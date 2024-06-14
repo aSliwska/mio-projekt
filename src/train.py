@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import sklearn.metrics
 
+from torchvision.ops import MLP
 from PIL import Image
 from torchvision.transforms import v2
 from torchvision.datasets import CIFAR10
@@ -59,8 +60,8 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 #data_train, data_valid, targets_train, targets_valid = train_test_split(cifar10.data, cifar10.targets, test_size=0.2, stratify=cifar10.targets)
 
-X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp)
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.1, random_state=42, stratify=y)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.111111, random_state=42, stratify=y_temp)
 
 
 # # 66.66%
@@ -75,6 +76,8 @@ X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, r
 # testDataset = Cifar10Dataset(cifar10_test.data, cifar10_test.targets, transform=cifar10_test.transform)
 # testLoader = DataLoader(testDataset, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=False)
 
+#print(X_train)
+
 train_dataset = CarEvaluationDataset(X_train, y_train)
 valid_dataset = CarEvaluationDataset(X_val, y_val)
 test_dataset = CarEvaluationDataset(X_test, y_test)
@@ -83,56 +86,35 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, nu
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=False)
 
-class CarNet(nn.Module):
-    def __init__(self):
-        super(CarNet, self).__init__()
-        self.inp = nn.Linear(6, 16)
-        self.conv1 = nn.Conv2d(6, 16, 3)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(576, 288)
-        self.fc2 = nn.Linear(288, 72)
-        self.fc3 = nn.Linear(72, 10)
-        self.outp = nn.Linear(32, 4)  # 4 output classes
-
-    def forward(self, x):
-        x = F.relu(self.inp(x))
-        x = F.relu(self.pool(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = self.outp(x)
-        return x
-
 
 if __name__=='__main__':
-    model = CarNet().to(device)
+    
+    model = MLP(in_channels=6, hidden_channels=[100,100,100,100,100], activation_layer=nn.ReLU)
 
     criterion = nn.CrossEntropyLoss()
-    lr = 6e-3
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9) # , weight_decay=1e-5
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.05, patience=0, threshold_mode='abs') 
-    early_stopper = EarlyStopper(patience=2, min_change=0, mode='min')
-    batch_print_step = 500
-    epochs = 50
+    optimizer = torch.optim.Adam(model.parameters())
+    epochs = 1500
+    epoch_print_step = 100
 
     best_train_loss = float('inf')
     best_val_loss = float('inf')
 
     train_loss_history = []
     val_loss_history = []
+    train_acc_history = []
+    val_acc_history = []
     train_f1_history = []
     val_f1_history = []
-
+    timestart = time.time()
 
     for epoch in range(epochs):
-        # index 0 is for training, index 1 for validation
+        
         epoch_loss = [0, 0]
         accuracy = [0, 0]
         f1_score = [0, 0]
         epochtime = time.time()
-        
-        for dataset, dataloader, isTraining in [(train_dataset, train_loader, True), (valid_dataset, valid_loader, False)]:
+
+        for dataset, isTraining in [(train_dataset, True), (valid_dataset, False)]:
             correct = 0
             running_loss = 0.0
             all_input_labels = []
@@ -143,36 +125,29 @@ if __name__=='__main__':
             else:
                 model.eval()
 
-            for i, data in enumerate(dataloader, 0):        
-                # get the inputs
-                text_data, labels = data
-                text_data = text_data.to(device)
-                labels = labels.to(device)
+            if isTraining:
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-                if isTraining:
-                    # zero the parameter gradients
-                    optimizer.zero_grad()
+            data = torch.from_numpy(dataset.features).type(torch.FloatTensor)
+            labels = torch.from_numpy(dataset.labels).type(torch.LongTensor)
 
-                # forward 
-                outputs = model(text_data)
-                _, predicted = torch.max(outputs, 1)
-                
-                loss = criterion(outputs, labels)
+            # forward 
+            outputs = model(data)
+            _, predicted = torch.max(outputs, 1)
+            
+            loss = criterion(outputs, labels)
 
-                if isTraining:
-                    # backward + optimize
-                    loss.backward()
-                    optimizer.step()
+            if isTraining:
+                # backward + optimize
+                loss.backward()
+                optimizer.step()
 
-                # print statistics
-                running_loss += loss.item() * text_data.size(0)
-                correct += torch.sum(predicted == labels.data)
-                all_predicted_labels.append(predicted.cpu())
-                all_input_labels.append(labels.cpu())
-                
-                if i % batch_print_step == batch_print_step-1:
-                    print("\r", f'{"TRAINING" if isTraining else "VALIDATION"} PROGRESS [epoch: {epoch + 1}, {100*batch_size*(i + 1)/len(dataset):.3f}%, {math.floor(time.time() - epochtime):3d}s] loss: {running_loss / len(dataset):.3f}', end="")
-                    timestart = time.time()
+            # print statistics
+            running_loss += loss.item() * data.size(0)
+            correct += torch.sum(predicted == labels.data)
+            all_predicted_labels.append(predicted)
+            all_input_labels.append(labels)
             
             index = 0 if isTraining else 1
             epoch_loss[index] = running_loss / len(dataset)
@@ -181,17 +156,14 @@ if __name__=='__main__':
             all_predicted_labels = np.concatenate(all_predicted_labels)
             f1_score[index] = sklearn.metrics.f1_score(all_input_labels, all_predicted_labels, average='macro')
 
-        print("\r" + f'EPOCH: [{epoch + 1:2d}/{epochs}, time: {math.floor(time.time() - epochtime)}s]   TRAIN: [loss: {epoch_loss[0]:.3f}, acc: {accuracy[0]:.3f}, f1: {f1_score[0]:.3f}]   VAL: [loss: {epoch_loss[1]:.3f}, acc: {accuracy[1]:.3f}, f1: {f1_score[1]:.3f}]   learning_rate: {lr}') 
+        if epoch % epoch_print_step == epoch_print_step-1:
+            print("\r" + f'EPOCH: [{epoch + 1:2d}/{epochs}, {epoch_print_step}_time: {math.floor(time.time() - timestart)}s]   TRAIN: [loss: {epoch_loss[0]:.3f}, acc: {accuracy[0]:.3f}, f1: {f1_score[0]:.3f}]   VAL: [loss: {epoch_loss[1]:.3f}, acc: {accuracy[1]:.3f}, f1: {f1_score[1]:.3f}]') 
+            timestart = time.time()
         train_loss_history.append(epoch_loss[0])
         val_loss_history.append(epoch_loss[1])
+        train_acc_history.append(accuracy[0])
+        val_acc_history.append(accuracy[1])
         train_f1_history.append(f1_score[0])
         val_f1_history.append(f1_score[1])
-
-        if early_stopper.stop_early(epoch_loss[1]): 
-            print("stopping early")
-            break
-
-        scheduler.step(epoch_loss[1])
-        lr = scheduler.get_last_lr()
 
     print('done')
